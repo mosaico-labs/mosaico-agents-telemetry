@@ -15,6 +15,7 @@ import pyarrow.compute as pc
 import pyarrow.flight as fl
 import pyarrow.ipc as pa_ipc
 
+from mosaicolabs import telemetry
 from mosaicolabs.logging_config import get_logger
 from mosaicolabs.models.core import Message
 
@@ -81,6 +82,7 @@ class _TopicWriteState:
 
         self.topic_name: str = topic_name
         self.writer: Optional[fl.FlightStreamWriter] = writer
+        self._telemetry = telemetry.StreamStats("write", topic=topic_name)
         self.data_schema: pa.StructType = data_schema
         self.max_batch_size_bytes = max_batch_size_bytes
         # The schema of the record batches sent on the wire (envelope + payload fields)
@@ -273,6 +275,7 @@ class _TopicWriteState:
             # Transmission (IO)
             tstart = time.time()
             self.writer.write(batch)
+            self._telemetry.add(batch.num_rows, batch.nbytes)
             logger.debug(
                 f"'writer.write' MB {self._get_serialized_size(batch) / (1024 * 1024)}, time: {time.time() - tstart}"
             )
@@ -317,5 +320,11 @@ class _TopicWriteState:
                     f"Dropped (oversized): {self._oversized_records}"
                 )
             finally:
+                self._telemetry.finish(
+                    pushed=self._pushed_records,
+                    written=self._written_records,
+                    dropped_oversized=self._oversized_records,
+                    with_error=with_error,
+                )
                 self.writer.close()
                 self.writer = None

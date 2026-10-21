@@ -9,10 +9,13 @@ use mosaicod_config::params;
 use mosaicod_core as core;
 use mosaicod_db as db;
 use mosaicod_facade as facade;
-use mosaicod_grpc_common::{self as grpc_common, PublicErrorGrpcExt, ToStatusExt, middleware};
+use mosaicod_grpc_common::{
+    self as grpc_common, PublicErrorGrpcExt, ToStatusExt, middleware, telemetry,
+};
 use mosaicod_marshal as marshal;
 use mosaicod_query as query;
 use mosaicod_store as store;
+use serde_json::json;
 use std::sync::Arc;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::error;
@@ -148,13 +151,42 @@ impl Service {
             ))?;
         }
 
+        let tctx = telemetry::request_ctx(&request);
         let ticket = request.into_inner();
-        let data_stream = endpoint::do_get(&self.context(), ticket).await?;
+
+        if tctx.is_none() {
+            let data_stream = endpoint::do_get(&self.context(), ticket).await?;
+            let out_stream = data_stream
+                .inspect_err(|e| error!("flight encoding error: {}", e))
+                .map_err(|e| Status::internal(format!("flight encoding error: {}", e)));
+            return Ok(Response::new(Box::pin(out_stream)));
+        }
+
+        // Telemetry: report rows/bytes streamed once the stream ends or is dropped
+        let extra = match marshal::flight::ticket_topic_from_binary(&ticket.ticket) {
+            Ok(t) => json!({
+                "locator": t.locator.to_string(),
+                "timestamp_range": t.timestamp_range.map(|r| r.to_string()),
+            }),
+            Err(_) => json!({}),
+        };
+        let stats = Arc::new(telemetry::StreamStats::default());
+        let data_stream = telemetry::scope(
+            tctx.clone(),
+            telemetry::with_stream_stats(stats.clone(), endpoint::do_get(&self.context(), ticket)),
+        )
+        .await?;
+        let mut guard = Some(telemetry::StreamGuard::new(tctx, "do_get", stats, extra));
 
         // Map data stream error (flight error) to a tonic one
         let out_stream = data_stream
             .inspect_err(|e| error!("flight encoding error: {}", e))
-            .map_err(|e| Status::internal(format!("flight encoding error: {}", e)));
+            .map_err(|e| Status::internal(format!("flight encoding error: {}", e)))
+            .inspect(move |item| {
+                if let (Err(e), Some(g)) = (item, guard.as_mut()) {
+                    g.set_error(e.message());
+                }
+            });
 
         Ok(Response::new(Box::pin(out_stream)))
     }
@@ -170,6 +202,7 @@ impl Service {
             ))?;
         }
 
+        let tctx = telemetry::request_ctx(&request);
         let stream = request.into_inner();
         let mut decoder = FlightDataDecoder::new(stream.map_err(Into::into));
 
@@ -178,7 +211,7 @@ impl Service {
             concurrent_writes_semaphore: self.concurrent_writes_semaphore.clone(),
         };
 
-        endpoint::do_put(ctx, &mut decoder).await?;
+        telemetry::scope(tctx, endpoint::do_put(ctx, &mut decoder)).await?;
 
         Ok(Response::new(Box::pin(futures::stream::empty())))
     }
@@ -189,10 +222,34 @@ impl Service {
     ) -> grpc_common::Result<Response<DoActionStream>> {
         let auth_ctx = middleware::auth_context(&request)?;
 
+        let tctx = telemetry::request_ctx(&request);
         let action = request.into_inner();
-        let action = marshal::ActionRequest::try_new(action.r#type.as_str(), &action.body)?;
+        let action_name = action.r#type.clone();
+        let body_bytes = action.body.len();
+        let started = std::time::Instant::now();
 
-        let stream = endpoint::do_action(&self.context(), action, auth_ctx.permissions()).await?;
+        let result = telemetry::scope(tctx.clone(), async {
+            let action = marshal::ActionRequest::try_new(action.r#type.as_str(), &action.body)?;
+            endpoint::do_action(&self.context(), action, auth_ctx.permissions()).await
+        })
+        .await;
+
+        if tctx.is_some() {
+            telemetry::emit_with(
+                tctx.as_ref(),
+                "action",
+                json!({
+                    "action": action_name,
+                    "body_bytes": body_bytes,
+                    "duration_ms": started.elapsed().as_secs_f64() * 1e3,
+                    "ok": result.is_ok(),
+                    "error": result.as_ref().err().map(|e| e.as_ref().to_string()),
+                    "grpc_code": result.as_ref().err().map(|e| e.grpc_code() as i32),
+                }),
+            );
+        }
+
+        let stream = result?;
 
         // Create the stream from the flight result
         Ok(Response::new(Box::pin(stream)))

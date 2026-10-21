@@ -2724,10 +2724,13 @@ dependencies = [
 name = "mosaicod-grpc-common"
 version = "0.8.0-dev"
 dependencies = [
+ "chrono",
  "http",
  "mosaicod-core",
  "mosaicod-facade",
+ "serde_json",
  "thiserror",
+ "tokio",
  "tokio-util",
  "tonic",
  "tower",

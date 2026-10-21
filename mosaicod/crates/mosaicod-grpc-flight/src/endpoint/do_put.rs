@@ -5,7 +5,7 @@ use futures::TryStreamExt;
 use mosaicod_core as core;
 use mosaicod_core::types;
 use mosaicod_facade as facade;
-use mosaicod_grpc_common as grpc_common;
+use mosaicod_grpc_common::{self as grpc_common, telemetry};
 use mosaicod_marshal as marshal;
 use mosaicod_rw as rw;
 use std::sync::Arc;
@@ -97,6 +97,10 @@ async fn do_put_topic_data(
 
     let mut writer = facade::topic::writer(ctx.clone(), topic_locator, &topic_uuid, schema).await?;
 
+    let started = Instant::now();
+    let stats = telemetry::StreamStats::default();
+    let ontology_tag = writer.ontology_tag().to_owned();
+
     // Consume all batches
     debug!("ready to receive batches");
     while let Some(data) = decoder
@@ -106,6 +110,7 @@ async fn do_put_topic_data(
     {
         match data.payload {
             DecodedPayload::RecordBatch(batch) => {
+                stats.add_batch(batch.num_rows(), data.inner.data_body.len());
                 debug!(
                     target = "received batch",
                     cols = batch.columns().len(),
@@ -149,6 +154,13 @@ async fn do_put_topic_data(
         target = "topic finalization",
         finalize_ms = time.elapsed().as_millis()
     );
+
+    let mut fields = stats.to_json();
+    fields["locator"] = serde_json::json!(locator);
+    fields["ontology_tag"] = serde_json::json!(ontology_tag);
+    fields["finalize_ms"] = serde_json::json!(time.elapsed().as_secs_f64() * 1e3);
+    fields["duration_ms"] = serde_json::json!(started.elapsed().as_secs_f64() * 1e3);
+    telemetry::emit("do_put", fields);
 
     Ok(())
 }

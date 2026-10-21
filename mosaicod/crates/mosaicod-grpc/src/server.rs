@@ -187,7 +187,12 @@ pub async fn serve(
     if !opts.enable_api_key_management {
         auth_layer = auth_layer.with_permission_passthrough(Permissions::all());
     }
-    let layer = tower::ServiceBuilder::new().layer(auth_layer).into_inner();
+    // Telemetry is the outermost layer so that rejected (unauthenticated) calls are recorded too.
+    // It is a no-op unless `MOSAICOD_TELEMETRY_FILE` is set.
+    let layer = tower::ServiceBuilder::new()
+        .layer(grpc_common::telemetry::TelemetryLayer)
+        .layer(auth_layer)
+        .into_inner();
 
     let mut builder = TonicServer::builder();
 

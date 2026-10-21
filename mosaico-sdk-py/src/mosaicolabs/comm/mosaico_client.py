@@ -43,6 +43,7 @@ from .do_action import (
     _DoActionNotificationList,
     _DoActionQueryResponse,
 )
+from .. import telemetry
 from .middlewares import MosaicoAuthMiddlewareFactory
 from .notifications import Notification
 from .sequence_page import (
@@ -230,6 +231,8 @@ class MosaicoClient:
         if api_key:
             auth_mware = MosaicoAuthMiddlewareFactory(api_key=api_key)
             middlewares["mosaico_auth"] = auth_mware
+        if telemetry.enabled():
+            middlewares["mosaico_telemetry"] = telemetry.TelemetryMiddlewareFactory()
 
         if isinstance(compression, GRPCCompressionAlgorithm):
             compression = GRPCCompression(algorithm=compression)
@@ -1102,6 +1105,8 @@ class MosaicoClient:
         elif query is None:
             raise ValueError("Expected input queries or a 'Query' object")
         self._queries = query._queries
+        filter_pb = query._to_proto()
+        telemetry.annotate(query=telemetry.query_dict(filter_pb))
 
         ACTION = FlightAction.QUERY
 
@@ -1109,7 +1114,7 @@ class MosaicoClient:
             act_resp = _do_action(
                 client=self._connection.flight_client,
                 action=ACTION,
-                request=requests_pb2.Query(filter=query._to_proto()),
+                request=requests_pb2.Query(filter=filter_pb),
                 expected_type=_DoActionQueryResponse,
             )
 
@@ -1120,6 +1125,13 @@ class MosaicoClient:
             # inject flight client and user queries
             act_resp.query_response._set_client(self._connection.flight_client)
             act_resp.query_response._set_queries(self._queries)
+
+            telemetry.annotate(
+                result_sequences=len(act_resp.query_response),
+                result_topics=sum(
+                    len(it.topics) for it in act_resp.query_response
+                ),
+            )
 
             return act_resp.query_response
 

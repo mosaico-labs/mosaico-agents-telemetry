@@ -12,6 +12,7 @@ from typing import Iterator, List, Optional
 import pyarrow as pa
 import pyarrow.flight as fl
 
+from mosaicolabs import telemetry
 from mosaicolabs.logging_config import get_logger
 
 # Set the hierarchical logger
@@ -72,6 +73,9 @@ class _TopicReadState:
         # Sentinel value: 'inf' indicates stream is empty or not yet started
         self.peeked_timestamp: float = float("inf")
 
+        # Usage telemetry (no-op unless enabled)
+        self._telemetry = telemetry.StreamStats("read", topic=topic_name)
+
     def _advance_to_next_batch(self) -> bool:
         """
         Loads the next `RecordBatch` from the stream and resets the row iterator.
@@ -114,10 +118,16 @@ class _TopicReadState:
             return None
         try:
             chunk = self.reader.read_chunk()
-            return (
+            data = (
                 chunk.data if chunk and chunk.data and chunk.data.num_rows > 0 else None
             )
+            if data is None:
+                self._telemetry.finish(exhausted=True)
+            else:
+                self._telemetry.add(data.num_rows, data.nbytes)
+            return data
         except StopIteration:
+            self._telemetry.finish(exhausted=True)
             return None
 
     def peek_next_row(self) -> bool:
@@ -177,6 +187,7 @@ class _TopicReadState:
         """
         Cancels the stream reader and releases resources.
         """
+        self._telemetry.finish(exhausted=False, with_error=with_error)
         if self.reader is not None:
             try:
                 self.reader.cancel()

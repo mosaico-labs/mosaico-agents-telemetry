@@ -19,3 +19,6 @@ tonic = { workspace = true }
 tower = { workspace = true }
 http = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }

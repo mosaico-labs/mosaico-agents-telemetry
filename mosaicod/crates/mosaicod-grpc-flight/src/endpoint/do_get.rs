@@ -9,7 +9,7 @@ use futures::TryStreamExt;
 use mosaicod_config::params;
 use mosaicod_core::{self as core};
 use mosaicod_facade as facade;
-use mosaicod_grpc_common as grpc_common;
+use mosaicod_grpc_common::{self as grpc_common, telemetry};
 use mosaicod_marshal as marshal;
 use tracing::{debug, info, trace};
 
@@ -45,9 +45,15 @@ pub async fn do_get(
     // Get data stream from query result
     let stream = query_result.stream().await?;
 
+    // Usage telemetry counters, reported by the caller when the stream ends
+    let stats = telemetry::stream_stats();
+
     // Convert the data stream to a flight stream casting the returned error
     let stream = stream
-        .inspect_ok(|batch| {
+        .inspect_ok(move |batch| {
+            if let Some(stats) = &stats {
+                stats.add_batch(batch.num_rows(), batch.get_array_memory_size());
+            }
             debug!(
                 target = "streaming batch",
                 cols = batch.columns().len(),
