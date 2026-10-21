@@ -25,7 +25,6 @@ import os
 import sys
 import threading
 import time
-import traceback
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
@@ -152,10 +151,15 @@ def _trim(v: Any) -> Any:
 
 
 def _caller() -> Optional[str]:
-    """First stack frame outside the SDK: identifies the user script/line."""
-    for frame in reversed(traceback.extract_stack()[:-2]):
-        if not os.path.abspath(frame.filename).startswith(_PKG_DIR):
-            return f"{frame.filename}:{frame.lineno}"
+    """First stack frame outside the SDK: identifies the user script/line.
+
+    Walks frames directly (no source-line loading, unlike traceback.extract_stack)."""
+    f = sys._getframe(2)
+    while f is not None:
+        fn = f.f_code.co_filename
+        if not fn.startswith(_PKG_DIR):
+            return f"{fn}:{f.f_lineno}"
+        f = f.f_back
     return None
 
 
