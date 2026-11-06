@@ -246,6 +246,15 @@ def api(name: str) -> Callable:
     return deco
 
 
+def cli_error(message: str) -> None:
+    """An error the CLI showed the user (kept on the current command, at most 5)."""
+    call = _current_call.get()
+    if call is not None:
+        errs = call.fields.setdefault("cli_errors", [])
+        if len(errs) < 5:
+            errs.append(_trim(message))
+
+
 def cli_main(app: Callable, argv: list) -> Any:
     """Runs a CLI entry point as one `cli.<command> <subcommand>` API call, so the SDK
     calls it makes are attributed to the command the user typed."""

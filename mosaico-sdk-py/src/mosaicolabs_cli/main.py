@@ -15,7 +15,27 @@ class _Typer(typer.Typer):
     def __call__(self, *args, **kwargs):
         from mosaicolabs import telemetry
 
+        if telemetry.enabled():
+            _record_cli_errors(telemetry)
         return telemetry.cli_main(lambda: super(_Typer, self).__call__(*args, **kwargs), sys.argv)
+
+
+def _record_cli_errors(telemetry) -> None:
+    """Commands report many failures (bad input, not found) on the error console and still
+    exit 0; keep those messages on the command's telemetry event."""
+    from rich.text import Text
+
+    from mosaicolabs_cli.utils.config import error_console
+
+    printer = error_console.print
+
+    def print_and_record(*objects, **kwargs):
+        telemetry.cli_error(
+            " ".join(Text.from_markup(o).plain if isinstance(o, str) else str(o) for o in objects)
+        )
+        return printer(*objects, **kwargs)
+
+    error_console.print = print_and_record
 
 
 app = _Typer(
