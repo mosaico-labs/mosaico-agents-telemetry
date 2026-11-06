@@ -2756,6 +2756,7 @@ dependencies = [
  "mosaicod-rw",
  "mosaicod-store",
  "semver",
+ "serde_json",
  "tokio",
  "tokio-stream",
  "tonic",

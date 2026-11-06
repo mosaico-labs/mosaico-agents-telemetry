@@ -29,6 +29,7 @@ arrow = { workspace = true }
 semver = { workspace = true }
 tracing = { workspace = true }
 datafusion = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 mosaicod-store = { workspace = true, features = ["testing"] }

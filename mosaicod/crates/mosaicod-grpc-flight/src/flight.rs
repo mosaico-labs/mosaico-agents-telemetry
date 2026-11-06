@@ -216,7 +216,7 @@ impl Service {
         }
 
         // Telemetry: report rows/bytes streamed once the stream ends or is dropped
-        let extra = match marshal::flight::ticket_topic_from_binary(&ticket.ticket) {
+        let extra = match marshal::flight::ticket_topic_from_bytes(&ticket.ticket) {
             Ok(t) => json!({
                 "locator": t.locator.to_string(),
                 "timestamp_range": t.timestamp_range.map(|r| r.to_string()),
