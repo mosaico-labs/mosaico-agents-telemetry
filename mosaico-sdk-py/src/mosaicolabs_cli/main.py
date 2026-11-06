@@ -1,3 +1,4 @@
+import sys
 from typing import Optional
 
 import typer
@@ -7,7 +8,17 @@ from mosaicolabs_cli.commands.extension import MosaicoRouter
 from mosaicolabs_cli.utils.env import MosaicoEnv
 from mosaicolabs_cli.utils.mosaico_profile import MosaicoProfile
 
-app = typer.Typer(
+
+class _Typer(typer.Typer):
+    """Records each CLI invocation in the opt-in usage telemetry (no-op when disabled)."""
+
+    def __call__(self, *args, **kwargs):
+        from mosaicolabs import telemetry
+
+        return telemetry.cli_main(lambda: super(_Typer, self).__call__(*args, **kwargs), sys.argv)
+
+
+app = _Typer(
     cls=MosaicoRouter,
     help="""
     Mosaico CLI — Command line tool to interact with the Mosaico platform

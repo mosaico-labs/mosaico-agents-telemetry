@@ -71,12 +71,54 @@ fn extract_command_from_flight_data(
     Ok(decoded)
 }
 
+/// Uploads one topic and emits a `do_put` usage event whether it succeeds or not, so failed
+/// uploads (bad schema, rejected batch, finalize error) are recorded with what was sent.
 async fn do_put_topic_data(
     ctx: DoPutContext,
     decoder: &mut FlightDataDecoder,
     schema: SchemaRef,
     cmd: types::flight::DoPutCmd,
 ) -> grpc_common::Result<()> {
+    if !telemetry::enabled() {
+        return upload_topic_data(ctx, decoder, schema, cmd, &mut PutTelemetry::default()).await;
+    }
+    let started = Instant::now();
+    let locator = cmd.locator.clone();
+    let mut t = PutTelemetry::default();
+    let result = upload_topic_data(ctx, decoder, schema, cmd, &mut t).await;
+
+    let mut fields = t.stats.to_json();
+    fields["locator"] = serde_json::json!(locator);
+    fields["ontology_tag"] = serde_json::json!(t.ontology_tag);
+    fields["finalize_ms"] = serde_json::json!(t.finalize_ms);
+    fields["duration_ms"] = serde_json::json!(started.elapsed().as_secs_f64() * 1e3);
+    fields["ok"] = serde_json::json!(result.is_ok());
+    if let Err(e) = &result {
+        fields["error"] = serde_json::json!(e.as_ref().to_string());
+        // where the upload stopped: before any data, while streaming, or at finalize
+        fields["stage"] = serde_json::json!(t.stage);
+    }
+    telemetry::emit("do_put", fields);
+
+    result
+}
+
+#[derive(Default)]
+struct PutTelemetry {
+    stats: telemetry::StreamStats,
+    ontology_tag: Option<String>,
+    finalize_ms: Option<f64>,
+    stage: &'static str,
+}
+
+async fn upload_topic_data(
+    ctx: DoPutContext,
+    decoder: &mut FlightDataDecoder,
+    schema: SchemaRef,
+    cmd: types::flight::DoPutCmd,
+    t: &mut PutTelemetry,
+) -> grpc_common::Result<()> {
+    t.stage = "open";
     let locator = cmd.locator;
     let uuid_str = &cmd.key;
 
@@ -97,9 +139,8 @@ async fn do_put_topic_data(
 
     let mut writer = facade::topic::writer(ctx.clone(), topic_locator, &topic_uuid, schema).await?;
 
-    let started = Instant::now();
-    let stats = telemetry::StreamStats::default();
-    let ontology_tag = writer.ontology_tag().to_owned();
+    t.ontology_tag = Some(writer.ontology_tag().to_owned());
+    t.stage = "stream";
 
     // Consume all batches
     debug!("ready to receive batches");
@@ -110,7 +151,7 @@ async fn do_put_topic_data(
     {
         match data.payload {
             DecodedPayload::RecordBatch(batch) => {
-                stats.add_batch(batch.num_rows(), data.inner.data_body.len());
+                t.stats.add_batch(batch.num_rows(), data.inner.data_body.len());
                 debug!(
                     target = "received batch",
                     cols = batch.columns().len(),
@@ -148,19 +189,14 @@ async fn do_put_topic_data(
         }
     }
 
+    t.stage = "finalize";
     let time = Instant::now();
     writer.finalize().await?;
+    t.finalize_ms = Some(time.elapsed().as_secs_f64() * 1e3);
     debug!(
         target = "topic finalization",
         finalize_ms = time.elapsed().as_millis()
     );
-
-    let mut fields = stats.to_json();
-    fields["locator"] = serde_json::json!(locator);
-    fields["ontology_tag"] = serde_json::json!(ontology_tag);
-    fields["finalize_ms"] = serde_json::json!(time.elapsed().as_secs_f64() * 1e3);
-    fields["duration_ms"] = serde_json::json!(started.elapsed().as_secs_f64() * 1e3);
-    telemetry::emit("do_put", fields);
 
     Ok(())
 }

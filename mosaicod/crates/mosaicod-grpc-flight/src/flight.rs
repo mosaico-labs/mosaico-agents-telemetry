@@ -98,9 +98,32 @@ impl Service {
             ))?;
         }
 
+        let tctx = telemetry::request_ctx(&request);
         let desc = request.into_inner();
-        let info = endpoint::get_flight_info(&self.context(), desc).await?;
-        Ok(Response::new(info))
+        if tctx.is_none() {
+            let info = endpoint::get_flight_info(&self.context(), desc).await?;
+            return Ok(Response::new(info));
+        }
+
+        // Telemetry: every sequence/topic handler lookup, including misses (wrong names)
+        let target = match marshal::flight::get_flight_info_cmd(&desc.cmd) {
+            Ok(c) => json!({
+                "locator": c.locator,
+                "timestamp_range": c.timestamp_range.map(|r| r.to_string()),
+            }),
+            Err(_) => json!({}),
+        };
+        let started = std::time::Instant::now();
+        let result = endpoint::get_flight_info(&self.context(), desc).await;
+        let mut fields = target;
+        fields["duration_ms"] = json!(started.elapsed().as_secs_f64() * 1e3);
+        fields["ok"] = json!(result.is_ok());
+        match &result {
+            Ok(info) => fields["endpoints"] = json!(info.endpoint.len()),
+            Err(e) => fields["error"] = json!(e.as_ref().to_string()),
+        }
+        telemetry::emit_with(tctx.as_ref(), "flight_info", fields);
+        Ok(Response::new(result?))
     }
 
     async fn impl_get_schema(
@@ -132,11 +155,41 @@ impl Service {
             ))?;
         }
 
+        let tctx = telemetry::request_ctx(&request);
         let criteria = request.into_inner();
-        let stream = endpoint::list_flights(&self.context(), criteria).await?;
+        if tctx.is_none() {
+            let stream = endpoint::list_flights(&self.context(), criteria).await?;
+            let stream = stream.map(|item| item.log_to_status());
+            return Ok(Response::new(Box::pin(stream)));
+        }
+
+        // Telemetry: sequence listing pages; `rows` counts the sequences returned
+        let extra = match marshal::flight::list_flights_cmd(&criteria.expression) {
+            Ok(c) => json!({ "start": format!("{:?}", c.start), "limit": format!("{:?}", c.limit) }),
+            Err(_) => json!({}),
+        };
+        let stats = Arc::new(telemetry::StreamStats::default());
+        let mut guard = telemetry::StreamGuard::new(tctx, "list_flights", stats.clone(), extra);
+        let stream = match endpoint::list_flights(&self.context(), criteria).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                guard.set_error(e.as_ref().to_string());
+                return Err(e);
+            }
+        };
 
         // Convert the returned stream inner result error to tonis::Status
-        let stream = stream.map(|item| item.log_to_status());
+        let mut guard = Some(guard);
+        let stream = stream.map(|item| item.log_to_status()).inspect(move |item| {
+            match item {
+                Ok(_) => stats.add_batch(1, 0),
+                Err(e) => {
+                    if let Some(g) = guard.as_mut() {
+                        g.set_error(e.message());
+                    }
+                }
+            }
+        });
         Ok(Response::new(Box::pin(stream)))
     }
 

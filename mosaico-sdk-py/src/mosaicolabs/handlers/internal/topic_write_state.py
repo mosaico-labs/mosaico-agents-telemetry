@@ -83,6 +83,7 @@ class _TopicWriteState:
         self.topic_name: str = topic_name
         self.writer: Optional[fl.FlightStreamWriter] = writer
         self._telemetry = telemetry.StreamStats("write", topic=topic_name)
+        self._push_batch_calls = 0
         self.data_schema: pa.StructType = data_schema
         self.max_batch_size_bytes = max_batch_size_bytes
         # The schema of the record batches sent on the wire (envelope + payload fields)
@@ -255,6 +256,8 @@ class _TopicWriteState:
             self.writer.write(batch)
         except Exception as e:
             raise Exception(f"Write failed for topic '{self.topic_name}': '{e}'")
+        self._telemetry.add(batch.num_rows, batch.nbytes)
+        self._push_batch_calls += 1
 
         self._pushed_records += batch.num_rows
         self._written_records += batch.num_rows
@@ -324,6 +327,7 @@ class _TopicWriteState:
                     pushed=self._pushed_records,
                     written=self._written_records,
                     dropped_oversized=self._oversized_records,
+                    push_batch_calls=self._push_batch_calls,
                     with_error=with_error,
                 )
                 self.writer.close()

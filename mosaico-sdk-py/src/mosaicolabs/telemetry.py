@@ -198,14 +198,29 @@ def api(name: str) -> Callable:
 
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
-            if not enabled() or _current_call.get() is not None:
+            if not enabled():
                 return fn(*args, **kwargs)
+            outer = _current_call.get()
+            if outer is not None:
+                # Nested call: attributed to the outermost one, but keep its failures, which
+                # callers (the CLI, scripts with try/except) often swallow or reword.
+                try:
+                    return fn(*args, **kwargs)
+                except Exception as e:
+                    errs = outer.fields.setdefault("inner_errors", [])
+                    if len(errs) < 5:
+                        errs.append({"api": name, "error_type": type(e).__name__, "error": _trim(str(e))})
+                    raise
             call = _Call(name)
             token = _current_call.set(call)
             started = time.perf_counter()
             err: Optional[BaseException] = None
             try:
                 return fn(*args, **kwargs)
+            except SystemExit as e:  # CLI entry points exit; code 0/None is success
+                if e.code not in (0, None):
+                    err = e
+                raise
             except BaseException as e:
                 err = e
                 raise
@@ -220,7 +235,7 @@ def api(name: str) -> Callable:
                 }
                 if err is not None:
                     fields["error_type"] = type(err).__name__
-                    fields["error"] = _trim(str(err))
+                    fields["error"] = f"exit {err.code}" if isinstance(err, SystemExit) else _trim(str(err))
                 fields.update(call.fields)
                 emit("api_call", **fields)
                 _current_call.reset(token)
@@ -229,6 +244,29 @@ def api(name: str) -> Callable:
         return wrapper
 
     return deco
+
+
+def cli_main(app: Callable, argv: list) -> Any:
+    """Runs a CLI entry point as one `cli.<command> <subcommand>` API call, so the SDK
+    calls it makes are attributed to the command the user typed."""
+    words = []
+    skip = False
+    for tok in argv[1:]:
+        if skip:
+            skip = False
+        elif tok == "--profile":
+            skip = True
+        elif not tok.startswith("-"):
+            words.append(tok)
+        if len(words) == 2:
+            break
+    name = "cli." + (" ".join(words) or "<none>")
+
+    def run():
+        annotate(argv=[_trim(a) for a in argv[1:16]])
+        return app()
+
+    return api(name)(run)()
 
 
 def _wrap_methods(cls: type, names, prefix: str) -> None:
@@ -388,6 +426,8 @@ def install() -> None:
 
     from .comm.mosaico_client import MosaicoClient
     from .handlers.sequence_handler import SequenceHandler
+    from .handlers.sequence_updater import SequenceUpdater
+    from .handlers.sequence_writer import SequenceWriter
     from .handlers.topic_handler import TopicHandler
     from .ml.data_frame_extractor import DataFrameExtractor
     from .ml.sync_transformer import SyncTransformer
@@ -400,7 +440,8 @@ def install() -> None:
             "topic_exists", "sequence_create", "sequence_update", "sequence_delete",
             "session_delete", "list_sequences", "list_sequence_notifications",
             "clear_sequence_notifications", "list_topic_notifications",
-            "clear_topic_notifications", "query", "info",
+            "clear_topic_notifications", "query", "info", "list_sequences_page",
+            "iter_sequences",
         ],
         "client",
     )
@@ -408,6 +449,14 @@ def install() -> None:
     _wrap_methods(TopicHandler, ["get_data_streamer"], "topic")
     _wrap_methods(DataFrameExtractor, ["to_pandas_chunks"], "ml.dataframe")
     _wrap_methods(SyncTransformer, ["fit", "transform"], "ml.sync")
+    _wrap_methods(SequenceWriter, ["topic_create"], "writer")
+    _wrap_methods(SequenceUpdater, ["topic_create"], "updater")
+    try:
+        from .ml.decoding_transformer import VideoDecodingTransformer
+
+        _wrap_methods(VideoDecodingTransformer, ["fit", "transform"], "ml.video")
+    except Exception:  # optional video dependencies
+        pass
     for cls_name in dir(qr):
         cls = getattr(qr, cls_name)
         if isinstance(cls, type) and cls.__module__ == qr.__name__:
@@ -421,6 +470,19 @@ def install() -> None:
         from .bridges.ros.injector import RosbagInjector
 
         _wrap_methods(RosbagInjector, ["run"], "bridge.ros")
+    except Exception:
+        pass
+    try:
+        from .bridges.mcap.injector import MCAPInjector
+
+        _wrap_methods(MCAPInjector, ["run"], "bridge.mcap")
+    except Exception:
+        pass
+    try:
+        # export to files (MCAP, ...); subclasses inherit the wrapped run()
+        from .bridges.base_sequence_extractor import SequenceExtractor
+
+        _wrap_methods(SequenceExtractor, ["run"], "bridge.extract")
     except Exception:
         pass
 
